@@ -38,7 +38,7 @@ const ClipTrimmer = () => {
           <span className="text-gradient">Trim</span> Your Clips
         </h2>
         <p className="text-muted-foreground text-lg">
-          Select the segment you want to use for each slot
+          Drag the handles to select In & Out points
         </p>
       </motion.div>
 
@@ -49,8 +49,10 @@ const ClipTrimmer = () => {
           const done =
             c.durationSec <= s.durationSec || trimData.some((t) => t.clipId === c.id);
           return (
-            <button
+            <motion.button
               key={c.id}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               onClick={() => setActiveIndex(i)}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                 activeIndex === i
@@ -62,7 +64,7 @@ const ClipTrimmer = () => {
             >
               {s.label}
               {done && ' ✓'}
-            </button>
+            </motion.button>
           );
         })}
       </div>
@@ -74,18 +76,10 @@ const ClipTrimmer = () => {
           animate={{ opacity: 1 }}
           className="glass-card p-6"
         >
-          <div className="aspect-video rounded-lg overflow-hidden bg-secondary mb-4">
-            <video
-              src={clip.url}
-              className="w-full h-full object-contain"
-              controls
-              muted
-            />
-          </div>
-
           {needsTrim ? (
-            <TrimSlider
+            <DualHandleTrimmer
               clipId={clip.id}
+              clipUrl={clip.url}
               clipDuration={clip.durationSec}
               slotDuration={slot.durationSec}
               initial={existingTrim}
@@ -94,9 +88,19 @@ const ClipTrimmer = () => {
               }
             />
           ) : (
-            <p className="text-center text-sm text-muted-foreground">
-              ✓ This clip fits within the {slot.durationSec}s slot — no trimming needed.
-            </p>
+            <>
+              <div className="aspect-video rounded-lg overflow-hidden bg-secondary mb-4">
+                <video
+                  src={clip.url}
+                  className="w-full h-full object-contain"
+                  controls
+                  muted
+                />
+              </div>
+              <p className="text-center text-sm text-muted-foreground">
+                ✓ This clip fits within the {slot.durationSec}s slot — no trimming needed.
+              </p>
+            </>
           )}
         </motion.div>
       )}
@@ -112,6 +116,7 @@ const ClipTrimmer = () => {
           <motion.button
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
+            whileHover={{ scale: 1.03 }}
             whileTap={{ scale: 0.95 }}
             onClick={startProcessing}
             className="inline-flex items-center gap-2 px-8 py-3 rounded-lg bg-primary text-primary-foreground font-semibold hover:opacity-90 transition-opacity"
@@ -125,66 +130,157 @@ const ClipTrimmer = () => {
   );
 };
 
-function TrimSlider({
+/**
+ * Dual-handle trimmer with real-time video seeking
+ */
+function DualHandleTrimmer({
   clipId,
+  clipUrl,
   clipDuration,
   slotDuration,
   initial,
   onTrim,
 }: {
   clipId: string;
+  clipUrl: string;
   clipDuration: number;
   slotDuration: number;
   initial?: { startTime: number; endTime: number };
   onTrim: (start: number, end: number) => void;
 }) {
-  const [start, setStart] = useState(initial?.startTime ?? 0);
+  const [inPoint, setInPoint] = useState(initial?.startTime ?? 0);
+  const [outPoint, setOutPoint] = useState(initial?.endTime ?? slotDuration);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef<'in' | 'out' | null>(null);
 
-  const end = start + slotDuration;
-  const maxStart = clipDuration - slotDuration;
+  const selectedDuration = outPoint - inPoint;
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Math.min(parseFloat(e.target.value), maxStart);
-    setStart(val);
-    onTrim(val, val + slotDuration);
-  };
-
+  // Auto-set on mount
   useEffect(() => {
     if (!initial) {
-      onTrim(0, slotDuration);
+      const end = Math.min(slotDuration, clipDuration);
+      setInPoint(0);
+      setOutPoint(end);
+      onTrim(0, end);
     }
   }, []);
 
-  const pctLeft = (start / clipDuration) * 100;
-  const pctWidth = (slotDuration / clipDuration) * 100;
+  // Seek video when in-point changes
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = inPoint;
+    }
+  }, [inPoint]);
+
+  const handlePointerDown = useCallback(
+    (handle: 'in' | 'out') => (e: React.PointerEvent) => {
+      e.preventDefault();
+      draggingRef.current = handle;
+
+      const onMove = (ev: PointerEvent) => {
+        if (!trackRef.current || !draggingRef.current) return;
+        const rect = trackRef.current.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+        const time = parseFloat((pct * clipDuration).toFixed(1));
+
+        if (draggingRef.current === 'in') {
+          const newIn = Math.min(time, outPoint - 0.5);
+          setInPoint(Math.max(0, newIn));
+          if (videoRef.current) videoRef.current.currentTime = Math.max(0, newIn);
+        } else {
+          const newOut = Math.max(time, inPoint + 0.5);
+          setOutPoint(Math.min(clipDuration, newOut));
+        }
+      };
+
+      const onUp = () => {
+        if (draggingRef.current === 'in') {
+          onTrim(inPoint, outPoint);
+        } else {
+          onTrim(inPoint, outPoint);
+        }
+        draggingRef.current = null;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    },
+    [clipDuration, inPoint, outPoint, onTrim]
+  );
+
+  const pctIn = (inPoint / clipDuration) * 100;
+  const pctOut = (outPoint / clipDuration) * 100;
 
   return (
     <div>
-      <div className="flex justify-between text-xs text-muted-foreground mb-2">
-        <span>Clip: {clipDuration.toFixed(1)}s</span>
-        <span>
-          Selected: {start.toFixed(1)}s – {end.toFixed(1)}s ({slotDuration}s)
-        </span>
-      </div>
-
-      <div className="relative h-10 rounded-lg bg-secondary overflow-hidden" ref={trackRef}>
-        {/* Selected range visualization */}
-        <div
-          className="absolute top-0 h-full bg-primary/30 border-x-2 border-primary rounded"
-          style={{ left: `${pctLeft}%`, width: `${pctWidth}%` }}
+      {/* Video preview */}
+      <div className="aspect-video rounded-lg overflow-hidden bg-secondary mb-4">
+        <video
+          ref={videoRef}
+          src={clipUrl}
+          className="w-full h-full object-contain"
+          muted
+          playsInline
         />
       </div>
 
-      <input
-        type="range"
-        min={0}
-        max={maxStart}
-        step={0.1}
-        value={start}
-        onChange={handleChange}
-        className="w-full mt-2 accent-[hsl(var(--primary))]"
-      />
+      {/* Info */}
+      <div className="flex justify-between text-xs text-muted-foreground mb-2">
+        <span>Clip: {clipDuration.toFixed(1)}s</span>
+        <span>
+          In: {inPoint.toFixed(1)}s — Out: {outPoint.toFixed(1)}s ({selectedDuration.toFixed(1)}s)
+        </span>
+        <span>Slot: {slotDuration}s</span>
+      </div>
+
+      {/* Dual-handle timeline */}
+      <div
+        ref={trackRef}
+        className="relative h-12 rounded-lg bg-secondary overflow-hidden select-none touch-none"
+      >
+        {/* Dimmed areas */}
+        <div
+          className="absolute top-0 h-full bg-background/50"
+          style={{ left: 0, width: `${pctIn}%` }}
+        />
+        <div
+          className="absolute top-0 h-full bg-background/50"
+          style={{ left: `${pctOut}%`, width: `${100 - pctOut}%` }}
+        />
+
+        {/* Selected region */}
+        <div
+          className="absolute top-0 h-full bg-primary/20 border-x-2 border-primary"
+          style={{ left: `${pctIn}%`, width: `${pctOut - pctIn}%` }}
+        />
+
+        {/* In handle */}
+        <div
+          onPointerDown={handlePointerDown('in')}
+          className="absolute top-0 h-full w-4 cursor-ew-resize z-10 flex items-center justify-center group"
+          style={{ left: `calc(${pctIn}% - 8px)` }}
+        >
+          <div className="w-1.5 h-8 rounded-full bg-primary group-hover:bg-accent transition-colors shadow-lg" />
+        </div>
+
+        {/* Out handle */}
+        <div
+          onPointerDown={handlePointerDown('out')}
+          className="absolute top-0 h-full w-4 cursor-ew-resize z-10 flex items-center justify-center group"
+          style={{ left: `calc(${pctOut}% - 8px)` }}
+        >
+          <div className="w-1.5 h-8 rounded-full bg-primary group-hover:bg-accent transition-colors shadow-lg" />
+        </div>
+      </div>
+
+      {selectedDuration > slotDuration + 0.1 && (
+        <p className="mt-2 text-xs text-destructive flex items-center gap-1">
+          ⚠ Selection is {(selectedDuration - slotDuration).toFixed(1)}s over the {slotDuration}s limit. Tighten your range.
+        </p>
+      )}
     </div>
   );
 }
